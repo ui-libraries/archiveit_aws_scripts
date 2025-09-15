@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# required config from environment
+COLL_ID=${COLL_ID:?export COLL_ID}
+ARCHIVEIT_USER=${ARCHIVEIT_USER:?export ARCHIVEIT_USER}
+ARCHIVEIT_PASS=${ARCHIVEIT_PASS:?export ARCHIVEIT_PASS}
+S3_BUCKET=${S3_BUCKET:-uiowa-library-archiveit}
+S3_PREFIX=${S3_PREFIX:?export S3_PREFIX}
+
+# optional config
+PAGE_SIZE=${PAGE_SIZE:-100}
+LOG_FILE=${LOG_FILE:-new_uploads.txt}
+MAX_RETRIES=${MAX_RETRIES:-5}
+RETRY_DELAY=${RETRY_DELAY:-300}  # seconds
+
+: > "$LOG_FILE"
+page=${1:-1}
+
+while true; do
+  echo "Fetching page $page ($PAGE_SIZE results per page)…"
+
+  retry=0
+  while true; do
+    response=$(curl -s -u "$ARCHIVEIT_USER:$ARCHIVEIT_PASS" \
+      "https://warcs.archive-it.org/wasapi/v1/webdata?collection=$COLL_ID&page=$page&page_size=$PAGE_SIZE") || true
+    if echo "$response" | jq . >/dev/null 2>&1; then break; fi
+
+    echo "Bad response or rate limit, retry $((retry+1))/$MAX_RETRIES after $RETRY_DELAY s…"
+    ((retry++))
+    [[ $retry -ge $MAX_RETRIES ]] && { echo "Max retries; aborting." >&2; exit 1; }
+    sleep "$RETRY_DELAY"
+  done
+
+  file_count=$(jq '.files|length' <<<"$response")
+  [[ $file_count -eq 0 ]] && { echo "Done—no more pages."; break; }
+
+  echo "Found $file_count files on page $page"
+
+  jq -r '.files[].locations[0]' <<<"$response" | while read -r url; do
+    [[ -z "$url" ]] && continue
+    filename=$(basename "$url")
+    s3_key="$S3_PREFIX/$filename"
+
+    # faster than `aws s3 ls`
+    if aws s3api head-object --bucket "$S3_BUCKET" --key "$s3_key" >/dev/null 2>&1; then
+      echo "Skipping $filename (already in s3://$S3_BUCKET/$s3_key)"
+    else
+      # help multipart uploads for big files
+      size=$(curl -sI -u "$ARCHIVEIT_USER:$ARCHIVEIT_PASS" "$url" \
+             | awk -F': ' 'tolower($1)=="content-length"{gsub("\r","",$2);print $2}')
+      echo "Downloading & uploading $filename…"
+      wget -q -O- --http-user="$ARCHIVEIT_USER" --http-password="$ARCHIVEIT_PASS" "$url" \
+        | aws s3 cp - "s3://$S3_BUCKET/$s3_key" ${size:+--expected-size "$size"}
+      echo "$filename" >> "$LOG_FILE"
+    fi
+  done
+
+  ((page++))
+done
+
+echo "New uploads logged to $LOG_FILE"
