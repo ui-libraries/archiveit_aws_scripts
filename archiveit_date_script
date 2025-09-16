@@ -14,7 +14,7 @@ LOG_FILE=${LOG_FILE:-new_uploads.txt}
 MAX_RETRIES=${MAX_RETRIES:-5}
 RETRY_DELAY=${RETRY_DELAY:-300}  # seconds
 
-# optional: only fetch files with store-time AFTER this timestamp
+# optional: only fetch files with store-time AFTER this RFC3339 timestamp
 # e.g., 2025-09-01 or 2025-09-01T00:00:00Z
 AFTER_VALUE=${AFTER_VALUE:-}
 
@@ -53,12 +53,9 @@ while true; do
     if aws s3api head-object --bucket "$S3_BUCKET" --key "$s3_key" >/dev/null 2>&1; then
       echo "Skipping $filename (already in s3://$S3_BUCKET/$s3_key)"
     else
-      # help multipart uploads for big files
-      size=$(curl -sI -u "$ARCHIVEIT_USER:$ARCHIVEIT_PASS" "$url" \
-             | awk -F': ' 'tolower($1)=="content-length"{gsub("\r","",$2);print $2}')
       echo "Downloading & uploading $filename…"
       wget -q -O- --http-user="$ARCHIVEIT_USER" --http-password="$ARCHIVEIT_PASS" "$url" \
-        | aws s3 cp - "s3://$S3_BUCKET/$s3_key" ${size:+--expected-size "$size"}
+        | aws s3 cp - "s3://$S3_BUCKET/$s3_key"
       echo "$filename" >> "$LOG_FILE"
     fi
   done
